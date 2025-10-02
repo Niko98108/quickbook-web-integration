@@ -1,0 +1,517 @@
+import React, { useState, useEffect } from "react";
+import {
+  Settings,
+  CheckCircle,
+  XCircle,
+  ExternalLink,
+  RefreshCw,
+  LogOut,
+} from "lucide-react";
+
+// Mock user ID - in production, get from authentication
+const CURRENT_USER_ID = 1;
+
+// Configuration - Replace with your actual values
+const QB_CONFIG = {
+  clientId: "",
+  clientSecret: "",
+  redirectUri: "http://localhost:3000/callback",
+  environment: "sandbox", // 'sandbox' or 'production'
+  authUrl: "https://appcenter.intuit.com/connect/oauth2",
+  tokenUrl: "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+  apiBaseUrl: "https://sandbox-quickbooks.api.intuit.com",
+  backendUrl: "http://localhost:3030",
+};
+
+// Simulated Database (localStorage)
+const DB = {
+  getConnection: (userId) => {
+    const data = localStorage.getItem(`qb_connection_${userId}`);
+    return data ? JSON.parse(data) : null;
+  },
+
+  saveConnection: (userId, connectionData) => {
+    localStorage.setItem(
+      `qb_connection_${userId}`,
+      JSON.stringify(connectionData)
+    );
+  },
+
+  deleteConnection: (userId) => {
+    localStorage.removeItem(`qb_connection_${userId}`);
+  },
+};
+
+// OAuth Service
+const OAuthService = {
+  getAuthUrl: () => {
+    const state = Math.random().toString(36).substring(7);
+    sessionStorage.setItem("oauth_state", state);
+
+    const params = new URLSearchParams({
+      client_id: QB_CONFIG.clientId,
+      scope: "com.intuit.quickbooks.accounting",
+      redirect_uri: QB_CONFIG.redirectUri,
+      response_type: "code",
+      state: state,
+    });
+
+    return `${QB_CONFIG.authUrl}?${params.toString()}`;
+  },
+
+  exchangeCodeForTokens: async (code, realmId, state) => {
+    // Call your backend API instead of QuickBooks directly
+    const response = await fetch(
+      `${QB_CONFIG.backendUrl}/quickbook/auth/connect`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization:
+            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwOi8vZW1wbG95ZXIuZ2V0Y2xldmVyaS5jb20iLCJleHAiOjE3NjY1NjY1NjAsImlhdCI6MTc1ODcwNDE2MCwiaXNzIjoiaHR0cDovL3d3dy5nZXRjbGV2ZXJpLmNvbSIsIm9yZyI6ImNsZXZlcmktbW9uZXRhLmxrIiwicm9sZSI6Ik9XTkVSIiwidXNlciI6MX0.2vIkYGVqjqjEBsdlv0H5Vpu07kj9XgSln67p2tePJZs",
+        },
+        body: JSON.stringify({
+          realmId: realmId,
+          state: state,
+          code: code,
+          redirectUri: QB_CONFIG.redirectUri,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(
+        errorData.message || "Failed to exchange code for tokens"
+      );
+    }
+
+    const data = await response.json();
+
+    // Check if the backend response indicates success
+    if (data.data && data.data.result === true) {
+      return {
+        access_token: data.data.access_token || "",
+        refresh_token: data.data.refresh_token || "",
+        expires_in: data.data.expires_in || 3600,
+        x_refresh_token_expires_in:
+          data.data.x_refresh_token_expires_in || 8726400,
+        realm_id: realmId,
+      };
+    } else {
+      throw new Error(data.message || "Authorization failed");
+    }
+  },
+
+  refreshAccessToken: async (refreshToken) => {
+    const authHeader = btoa(`${QB_CONFIG.clientId}:${QB_CONFIG.clientSecret}`);
+
+    const response = await fetch(QB_CONFIG.tokenUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${authHeader}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to refresh token");
+    }
+
+    return response.json();
+  },
+};
+
+// QuickBooks API Service
+const QuickBooksAPI = {
+  getCompanyInfo: async (realmId, accessToken) => {
+    const response = await fetch(
+      `${QB_CONFIG.apiBaseUrl}/v3/company/${realmId}/companyinfo/${realmId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch company info");
+    }
+
+    return response.json();
+  },
+};
+
+// Main Dashboard Component
+const Dashboard = () => {
+  const [connection, setConnection] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState(null);
+  const [testResult, setTestResult] = useState(null);
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    loadConnection();
+    handleOAuthCallback();
+  }, []);
+
+  const loadConnection = () => {
+    const conn = DB.getConnection(CURRENT_USER_ID);
+    setConnection(conn);
+    setLoading(false);
+  };
+
+  const handleOAuthCallback = async () => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    const realmId = params.get("realmId");
+    const error = params.get("error");
+
+    if (error) {
+      setMessage({ type: "error", text: `Authorization failed: ${error}` });
+      window.history.replaceState({}, "", "/");
+      return;
+    }
+
+    if (code && state) {
+      const savedState = sessionStorage.getItem("oauth_state");
+
+      if (state !== savedState) {
+        setMessage({
+          type: "error",
+          text: "Invalid state parameter. Security check failed.",
+        });
+        window.history.replaceState({}, "", "/");
+        return;
+      }
+
+      try {
+        setLoading(true);
+        const tokenData = await OAuthService.exchangeCodeForTokens(
+          code,
+          realmId,
+          state
+        );
+
+        const connectionData = {
+          realmId: realmId,
+          accessToken: tokenData.access_token,
+          refreshToken: tokenData.refresh_token,
+          accessTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
+          refreshTokenExpiresAt:
+            Date.now() + tokenData.x_refresh_token_expires_in * 1000,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        DB.saveConnection(CURRENT_USER_ID, connectionData);
+        setConnection(connectionData);
+        setMessage({
+          type: "success",
+          text: "Successfully connected to QuickBooks!",
+        });
+
+        sessionStorage.removeItem("oauth_state");
+        window.history.replaceState({}, "", "/");
+      } catch (error) {
+        setMessage({
+          type: "error",
+          text: "Failed to complete authorization: " + error.message,
+        });
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleConnect = () => {
+    window.location.href = OAuthService.getAuthUrl();
+  };
+
+  const handleDisconnect = () => {
+    if (window.confirm("Are you sure you want to disconnect QuickBooks?")) {
+      DB.deleteConnection(CURRENT_USER_ID);
+      setConnection(null);
+      setTestResult(null);
+      setMessage({
+        type: "success",
+        text: "Successfully disconnected from QuickBooks.",
+      });
+    }
+  };
+
+  const handleTestAPI = async () => {
+    setTesting(true);
+    setTestResult(null);
+
+    try {
+      // Check if token needs refresh
+      if (connection.accessTokenExpiresAt < Date.now() + 300000) {
+        const tokenData = await OAuthService.refreshAccessToken(
+          connection.refreshToken
+        );
+
+        const updatedConnection = {
+          ...connection,
+          accessToken: tokenData.access_token,
+          refreshToken: tokenData.refresh_token,
+          accessTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
+          refreshTokenExpiresAt:
+            Date.now() + tokenData.x_refresh_token_expires_in * 1000,
+          updatedAt: new Date().toISOString(),
+        };
+
+        DB.saveConnection(CURRENT_USER_ID, updatedConnection);
+        setConnection(updatedConnection);
+      }
+
+      const companyInfo = await QuickBooksAPI.getCompanyInfo(
+        connection.realmId,
+        connection.accessToken
+      );
+      setTestResult({ success: true, data: companyInfo });
+      setMessage({ type: "success", text: "API test successful!" });
+    } catch (error) {
+      setTestResult({ success: false, error: error.message });
+      setMessage({ type: "error", text: "API test failed: " + error.message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-500 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient from-indigo-500 p-6">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <div className="bg-white rounded-xl shadow-2xl p-8 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-800 mb-2">
+                QuickBooks Integration
+              </h1>
+              <p className="text-gray-600">
+                Connect your QuickBooks Online account to sync financial data
+              </p>
+            </div>
+            <Settings className="w-8 h-8 text-indigo-500" />
+          </div>
+
+          {/* Message Alert */}
+          {message && (
+            <div
+              className={`mb-6 p-4 rounded-lg flex items-start gap-3 ${
+                message.type === "success"
+                  ? "bg-green-50 border border-green-200 text-green-800"
+                  : "bg-red-50 border border-red-200 text-red-800"
+              }`}
+            >
+              {message.type === "success" ? (
+                <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              ) : (
+                <XCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              )}
+              <span>{message.text}</span>
+            </div>
+          )}
+
+          {/* Connection Status */}
+          <div
+            className={`flex items-center gap-3 p-4 rounded-lg mb-6 ${
+              connection
+                ? "bg-green-50 border border-green-200"
+                : "bg-red-50 border border-red-200"
+            }`}
+          >
+            <div
+              className={`w-3 h-3 rounded-full animate-pulse ${
+                connection ? "bg-green-500" : "bg-red-500"
+              }`}
+            ></div>
+            <span
+              className={`font-semibold ${
+                connection ? "text-green-800" : "text-red-800"
+              }`}
+            >
+              {connection ? "Connected to QuickBooks" : "Not Connected"}
+            </span>
+          </div>
+
+          {/* Connection Details */}
+          {connection && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+              <div className="bg-gray-50 p-4 rounded-lg border-l-4 border-indigo-500">
+                <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">
+                  Realm ID
+                </div>
+                <div className="font-semibold text-gray-800 break-all">
+                  {connection.realmId}
+                </div>
+              </div>
+              <div className="bg-gray-50 p-4 rounded-lg border-l-4 border-indigo-500">
+                <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">
+                  Connected Since
+                </div>
+                <div className="font-semibold text-gray-800">
+                  {new Date(connection.createdAt).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  })}
+                </div>
+              </div>
+              <div className="bg-gray-50 p-4 rounded-lg border-l-4 border-indigo-500">
+                <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">
+                  Last Updated
+                </div>
+                <div className="font-semibold text-gray-800">
+                  {new Date(connection.updatedAt).toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </div>
+              </div>
+              <div className="bg-gray-50 p-4 rounded-lg border-l-4 border-indigo-500">
+                <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">
+                  Token Status
+                </div>
+                <div className="font-semibold text-green-600">Active</div>
+              </div>
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="flex flex-wrap gap-3">
+            {connection ? (
+              <>
+                <button
+                  onClick={handleTestAPI}
+                  disabled={testing}
+                  className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all transform hover:-translate-y-0.5 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {testing ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      Testing...
+                    </>
+                  ) : (
+                    <>
+                      <ExternalLink className="w-5 h-5" />
+                      Test API Connection
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={handleDisconnect}
+                  className="flex items-center gap-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-all transform hover:-translate-y-0.5 hover:shadow-lg"
+                >
+                  <LogOut className="w-5 h-5" />
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleConnect}
+                className="flex items-center gap-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all transform hover:-translate-y-0.5 hover:shadow-lg font-semibold"
+              >
+                <svg
+                  className="w-5 h-5"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                </svg>
+                Connect to QuickBooks
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* API Test Results */}
+        {testResult && (
+          <div className="bg-white rounded-xl shadow-2xl p-8">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">
+              API Test Results
+            </h2>
+
+            {testResult.success ? (
+              <>
+                <div className="flex items-center gap-2 mb-4 text-green-600 font-semibold">
+                  <CheckCircle className="w-6 h-6" />
+                  Connection Successful
+                </div>
+                <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto">
+                  <pre className="text-green-400 text-sm">
+                    {JSON.stringify(testResult.data, null, 2)}
+                  </pre>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 mb-4 text-red-600 font-semibold">
+                  <XCircle className="w-6 h-6" />
+                  Connection Failed
+                </div>
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-800">
+                  {testResult.error}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Setup Instructions */}
+        {!connection && (
+          <div className="bg-white rounded-xl shadow-2xl p-8">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">
+              Setup Instructions
+            </h2>
+            <ol className="list-decimal list-inside space-y-3 text-gray-700">
+              <li>
+                Go to{" "}
+                <a
+                  href="https://developer.intuit.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-indigo-600 hover:underline"
+                >
+                  developer.intuit.com
+                </a>{" "}
+                and create an app
+              </li>
+              <li>Get your Client ID and Client Secret</li>
+              <li>
+                Add redirect URI:{" "}
+                <code className="bg-gray-100 px-2 py-1 rounded text-sm">
+                  http://localhost:3000/callback
+                </code>
+              </li>
+              <li>Update QB_CONFIG in the code with your credentials</li>
+              <li>Click "Connect to QuickBooks" button above</li>
+            </ol>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
