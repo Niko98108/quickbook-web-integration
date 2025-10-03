@@ -11,10 +11,10 @@ import {
 // Mock user ID - in production, get from authentication
 const CURRENT_USER_ID = 1;
 
-// Configuration - Replace with your actual values
+// Configuration - Loaded from .env file
 const QB_CONFIG = {
-  clientId: "",
-  clientSecret: "",
+  clientId: process.env.REACT_APP_QB_CLIENT_ID,
+  clientSecret: process.env.REACT_APP_QB_CLIENT_SECRET,
   redirectUri: "http://localhost:3000/callback",
   environment: "sandbox", // 'sandbox' or 'production'
   authUrl: "https://appcenter.intuit.com/connect/oauth2",
